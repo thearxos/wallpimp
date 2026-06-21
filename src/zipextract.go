@@ -93,8 +93,19 @@ func extractZipImpl(zipPath, repo, branch, subdir, destDir string,
 
 			fname := filepath.Base(f.Name)
 			outPath := flatSavePath(destDir, fname, digest)
+
+			// Claim a slot under the target cap BEFORE saving so concurrent
+			// workers cannot overshoot the requested count.
+			if capRemaining != nil && atomic.AddInt64(capRemaining, -1) < 0 {
+				atomic.AddInt64(capRemaining, 1)
+				return
+			}
+
 			if err := os.WriteFile(outPath, data, 0644); err != nil {
 				atomic.AddInt64(&stats.Errors, 1)
+				if capRemaining != nil {
+					atomic.AddInt64(capRemaining, 1)
+				}
 				if prog != nil {
 					prog(0, 0, 1)
 				}
@@ -103,9 +114,6 @@ func extractZipImpl(zipPath, repo, branch, subdir, destDir string,
 
 			db.add(digest, outPath)
 			atomic.AddInt64(&stats.New, 1)
-			if capRemaining != nil {
-				atomic.AddInt64(capRemaining, -1)
-			}
 			if prog != nil {
 				prog(1, 0, 0)
 			}

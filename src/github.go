@@ -460,8 +460,19 @@ func downloadRawFiles(rr ResolvedRepo, wdir string, workers int,
 
 			fname := filepath.Base(p)
 			outPath := flatSavePath(wdir, fname, digest)
+
+			// Claim a slot under the target cap BEFORE saving so concurrent
+			// workers cannot overshoot the requested count.
+			if capRemaining != nil && atomic.AddInt64(capRemaining, -1) < 0 {
+				atomic.AddInt64(capRemaining, 1)
+				return
+			}
+
 			if err := os.WriteFile(outPath, data, 0644); err != nil {
 				atomic.AddInt64(&stats.Errors, 1)
+				if capRemaining != nil {
+					atomic.AddInt64(capRemaining, 1)
+				}
 				if prog != nil {
 					prog(0, 0, 1)
 				}
@@ -470,9 +481,6 @@ func downloadRawFiles(rr ResolvedRepo, wdir string, workers int,
 
 			db.add(digest, outPath)
 			atomic.AddInt64(&stats.New, 1)
-			if capRemaining != nil {
-				atomic.AddInt64(capRemaining, -1)
-			}
 			if prog != nil {
 				prog(1, 0, 0)
 			}
