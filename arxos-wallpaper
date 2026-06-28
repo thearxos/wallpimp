@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ARXOS Wallpaper Manager  ·  v0.0.1
 # Native GTK3 wallpaper browser + setter for ARXOS. Styled to the ARXOS design.
-import gi, subprocess, os, threading, random
+import gi, subprocess, os, threading, random, tempfile, shutil
 gi.require_version('Gtk', '3.0')
 gi.require_version('GdkPixbuf', '2.0')
 from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
@@ -13,6 +13,17 @@ DIRS = ["/usr/share/backgrounds/arxos",
         "/usr/share/backgrounds"]
 EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 THUMB_W, THUMB_H = 230, 130
+DEST = os.path.expanduser("~/Pictures/Wallpapers")
+# curated wallpaper sources (owner, repo, branch-or-None, subpath-or-empty)
+SOURCES = [
+    ("frenzyexists", "wallpapers", None, ""),
+    ("michaelScopic", "Wallpapers", None, ""),
+    ("pollux78", "linuxnext-wallpapers", None, ""),
+    ("Samyc2002", "Anime-Wallpapers", None, ""),
+    ("logicyugi", "Backgrounds", None, ""),
+    ("LukePeetoom", "anime_wallpapers", None, ""),
+    ("k1ng440", "Wallpapers", "master", "wallpapers"),
+]
 
 CSS = b"""
 window { background:#08080a; }
@@ -91,9 +102,10 @@ class WallpaperManager(Gtk.Window):
         self.btn_slide = Gtk.Button(label="Slideshow"); self.btn_slide.get_style_context().add_class("tool"); self.btn_slide.connect("clicked", self.toggle_slide)
         self.btn_shuf = Gtk.Button(label="Shuffle"); self.btn_shuf.get_style_context().add_class("tool"); self.btn_shuf.connect("clicked", self.toggle_shuffle)
         self.btn_random = Gtk.Button(label="Surprise me"); self.btn_random.get_style_context().add_class("tool"); self.btn_random.connect("clicked", self.surprise)
+        self.btn_dl = Gtk.Button(label="Download more"); self.btn_dl.get_style_context().add_class("tool"); self.btn_dl.connect("clicked", self.download)
         self.btn_folder = Gtk.Button(label="Open folder"); self.btn_folder.get_style_context().add_class("tool"); self.btn_folder.connect("clicked", lambda *_: subprocess.Popen(["xdg-open", DIRS[0] if os.path.isdir(DIRS[0]) else os.path.expanduser("~")]))
         self.btn_refresh = Gtk.Button(label="Refresh"); self.btn_refresh.get_style_context().add_class("tool"); self.btn_refresh.connect("clicked", lambda *_: self.load())
-        for b in (self.btn_slide, self.btn_shuf, self.btn_random): bar.pack_start(b, False, False, 0)
+        for b in (self.btn_slide, self.btn_shuf, self.btn_random, self.btn_dl): bar.pack_start(b, False, False, 0)
         bar.pack_end(self.btn_refresh, False, False, 0); bar.pack_end(self.btn_folder, False, False, 0)
         root.pack_start(bar, False, False, 0)
 
@@ -124,6 +136,50 @@ class WallpaperManager(Gtk.Window):
     def surprise(self, *_):
         if self.papers:
             p = random.choice(self.papers); set_wallpaper(p)
+
+    def download(self, *_):
+        d = Gtk.Dialog(title="Download wallpapers", transient_for=self, modal=True); d.set_default_size(580, 440)
+        d.add_button("Close", Gtk.ResponseType.CLOSE)
+        a = d.get_content_area(); a.set_spacing(8)
+        for m in ("set_margin_top","set_margin_bottom","set_margin_start","set_margin_end"): getattr(a, m)(14)
+        info = Gtk.Label(label="Fetching from %d curated sources  →  %s" % (len(SOURCES), DEST)); info.set_xalign(0); info.get_style_context().add_class("sub")
+        a.pack_start(info, False, False, 0)
+        pb = Gtk.ProgressBar(); pb.set_show_text(True); a.pack_start(pb, False, False, 0)
+        tv = Gtk.TextView(); tv.set_editable(False); tv.set_monospace(True); tv.get_style_context().add_class("cap")
+        sc = Gtk.ScrolledWindow(); sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC); sc.add(tv); a.pack_start(sc, True, True, 0)
+        buf = tv.get_buffer(); stop = {"v": False}
+        d.connect("response", lambda *_a: stop.__setitem__("v", True))
+        def log(t): GLib.idle_add(lambda: (buf.insert(buf.get_end_iter(), t), tv.scroll_to_iter(buf.get_end_iter(), 0, False, 0, 0)) and False)
+        def setp(f, txt): GLib.idle_add(lambda: (pb.set_fraction(f), pb.set_text(txt)) and False)
+        def run():
+            if not sh("command -v git"): log("git is required to download wallpapers.\n"); return
+            os.makedirs(DEST, exist_ok=True)
+            have = set(os.listdir(DEST)); total = len(SOURCES); added = 0
+            for i, (owner, repo, branch, sub) in enumerate(SOURCES):
+                if stop["v"]: break
+                setp(i / total, "%d/%d  %s" % (i + 1, total, repo)); log("→ %s/%s …\n" % (owner, repo))
+                tmp = tempfile.mkdtemp(prefix="arxwp-")
+                cmd = ["git", "clone", "--depth", "1", "--quiet"]
+                if branch: cmd += ["--branch", branch]
+                cmd += ["https://github.com/%s/%s" % (owner, repo), tmp]
+                try:
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=420)
+                    if r.returncode != 0:
+                        log("  skipped (%s)\n" % ((r.stderr.strip().splitlines() or ["clone failed"])[-1][:60])); shutil.rmtree(tmp, ignore_errors=True); continue
+                except Exception as e:
+                    log("  error: %s\n" % e); shutil.rmtree(tmp, ignore_errors=True); continue
+                base = os.path.join(tmp, sub) if sub else tmp; n = 0
+                for rootd, _dn, files in os.walk(base):
+                    if "/.git" in rootd: continue
+                    for f in files:
+                        if f.lower().endswith(EXTS) and f not in have:
+                            try: shutil.copy2(os.path.join(rootd, f), os.path.join(DEST, f)); have.add(f); n += 1; added += 1
+                            except Exception: pass
+                log("  + %d new\n" % n); shutil.rmtree(tmp, ignore_errors=True)
+            setp(1.0, "done"); log("\nFinished — %d wallpapers added to %s\n" % (added, DEST))
+            GLib.idle_add(self.load)
+        threading.Thread(target=run, daemon=True).start()
+        d.run(); d.destroy()
 
     def load(self):
         for c in self.flow.get_children(): c.destroy()
