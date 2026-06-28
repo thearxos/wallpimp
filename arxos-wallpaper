@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+# ARXOS Wallpaper Manager  ·  v0.0.1
+# Native GTK3 wallpaper browser + setter for ARXOS. Styled to the ARXOS design.
+import gi, subprocess, os, threading, random
+gi.require_version('Gtk', '3.0')
+gi.require_version('GdkPixbuf', '2.0')
+from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
+
+VERSION = "0.0.1"
+DIRS = ["/usr/share/backgrounds/arxos",
+        os.path.expanduser("~/Pictures/Wallpapers"),
+        os.path.expanduser("~/Wallpapers"),
+        "/usr/share/backgrounds"]
+EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+THUMB_W, THUMB_H = 230, 130
+
+CSS = b"""
+window { background:#08080a; }
+.title  { font-family:'Playfair Display',serif; font-style:italic; font-size:24px; color:#ffffff; }
+.ver    { color:#e8702a; font-size:11px; font-weight:700; }
+.sub    { color:#7a7a80; font-size:11px; }
+.bar    { background:rgba(255,255,255,0.03); border-radius:12px; }
+.count  { color:#8a8a90; font-size:11px; }
+flowboxchild { padding:5px; border-radius:12px; }
+flowboxchild:selected { background:rgba(232,112,42,0.18); }
+.thumb  { border:2px solid rgba(255,255,255,0.08); border-radius:10px; }
+.thumb:hover { border:2px solid rgba(232,112,42,0.65); }
+.cap    { color:#9a9aa0; font-size:9px; }
+button.tool { background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12); border-radius:8px; color:#e8e8ea; padding:7px 14px; }
+button.tool:hover { background:rgba(232,112,42,0.16); border:1px solid rgba(232,112,42,0.55); }
+button.tool.on { background:rgba(232,112,42,0.9); color:#ffffff; border:1px solid #e8702a; }
+"""
+
+def sh(c):
+    try: return subprocess.check_output(c, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception: return ""
+
+def list_wallpapers():
+    seen, out = set(), []
+    for d in DIRS:
+        if not os.path.isdir(d): continue
+        try: names = sorted(os.listdir(d))
+        except Exception: continue
+        for f in names:
+            if f.lower().endswith(EXTS) and f not in seen:
+                seen.add(f); out.append(os.path.join(d, f))
+    return out
+
+def workspaces():
+    return [l[:-len("/last-image")] for l in sh("xfconf-query -c xfce4-desktop -l").splitlines() if l.endswith("/last-image")]
+
+def set_wallpaper(path):
+    ws = workspaces() or ["/backdrop/screen0/monitor0/workspace0"]
+    for w in ws:
+        subprocess.call(["xfconf-query","-c","xfce4-desktop","-p",w+"/last-image","-s",path,"--create","-t","string"])
+        subprocess.call(["xfconf-query","-c","xfce4-desktop","-p",w+"/image-style","-t","int","-s","5","--create"])
+    subprocess.Popen(["xfdesktop","--reload"])
+
+def set_cycle(on, shuffle, secs=300):
+    for w in workspaces():
+        subprocess.call(["xfconf-query","-c","xfce4-desktop","-p",w+"/backdrop-cycle-enable","-t","bool","-s",("true" if on else "false"),"--create"])
+        subprocess.call(["xfconf-query","-c","xfce4-desktop","-p",w+"/backdrop-cycle-period","-t","int","-s","1","--create"])
+        subprocess.call(["xfconf-query","-c","xfce4-desktop","-p",w+"/backdrop-cycle-timer","-t","uint","-s",str(secs),"--create"])
+        subprocess.call(["xfconf-query","-c","xfce4-desktop","-p",w+"/backdrop-cycle-random-order","-t","bool","-s",("true" if shuffle else "false"),"--create"])
+
+class WallpaperManager(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="ARXOS Wallpaper Manager")
+        self.set_default_size(920, 660)
+        try: self.set_icon_name("preferences-desktop-wallpaper")
+        except Exception: pass
+        p = Gtk.CssProvider(); p.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), p, Gtk.STYLE_PROVIDER_PRIORITY_USER)
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        for m in ("set_margin_top","set_margin_bottom","set_margin_start","set_margin_end"): getattr(root, m)(16)
+        self.add(root)
+
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        tw = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        t = Gtk.Label(); t.set_markup("Wallpaper <span foreground='#e8702a'>Manager</span>"); t.set_xalign(0); t.get_style_context().add_class("title")
+        sub = Gtk.Label(label="ARXOS  ·  v" + VERSION); sub.set_xalign(0); sub.get_style_context().add_class("sub")
+        tw.pack_start(t, False, False, 0); tw.pack_start(sub, False, False, 0)
+        head.pack_start(tw, True, True, 0)
+        self.count = Gtk.Label(); self.count.get_style_context().add_class("count"); self.count.set_valign(Gtk.Align.CENTER)
+        head.pack_start(self.count, False, False, 0)
+        root.pack_start(head, False, False, 0)
+
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8); bar.get_style_context().add_class("bar")
+        for m in ("set_margin_top","set_margin_bottom","set_margin_start","set_margin_end"): getattr(bar, m)(8)
+        self.btn_slide = Gtk.Button(label="Slideshow"); self.btn_slide.get_style_context().add_class("tool"); self.btn_slide.connect("clicked", self.toggle_slide)
+        self.btn_shuf = Gtk.Button(label="Shuffle"); self.btn_shuf.get_style_context().add_class("tool"); self.btn_shuf.connect("clicked", self.toggle_shuffle)
+        self.btn_random = Gtk.Button(label="Surprise me"); self.btn_random.get_style_context().add_class("tool"); self.btn_random.connect("clicked", self.surprise)
+        self.btn_folder = Gtk.Button(label="Open folder"); self.btn_folder.get_style_context().add_class("tool"); self.btn_folder.connect("clicked", lambda *_: subprocess.Popen(["xdg-open", DIRS[0] if os.path.isdir(DIRS[0]) else os.path.expanduser("~")]))
+        self.btn_refresh = Gtk.Button(label="Refresh"); self.btn_refresh.get_style_context().add_class("tool"); self.btn_refresh.connect("clicked", lambda *_: self.load())
+        for b in (self.btn_slide, self.btn_shuf, self.btn_random): bar.pack_start(b, False, False, 0)
+        bar.pack_end(self.btn_refresh, False, False, 0); bar.pack_end(self.btn_folder, False, False, 0)
+        root.pack_start(bar, False, False, 0)
+
+        sc = Gtk.ScrolledWindow(); sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.flow = Gtk.FlowBox(); self.flow.set_valign(Gtk.Align.START); self.flow.set_max_children_per_line(8)
+        self.flow.set_selection_mode(Gtk.SelectionMode.NONE); self.flow.set_homogeneous(True)
+        self.flow.set_row_spacing(4); self.flow.set_column_spacing(4)
+        sc.add(self.flow); root.pack_start(sc, True, True, 0)
+
+        self.sync_toggles(); self.load()
+
+    def sync_toggles(self):
+        ws = (workspaces() or [None])[0]
+        en = sh("xfconf-query -c xfce4-desktop -p %s/backdrop-cycle-enable" % ws) == "true" if ws else False
+        rnd = sh("xfconf-query -c xfce4-desktop -p %s/backdrop-cycle-random-order" % ws) == "true" if ws else False
+        (self.btn_slide.get_style_context().add_class if en else self.btn_slide.get_style_context().remove_class)("on")
+        (self.btn_shuf.get_style_context().add_class if rnd else self.btn_shuf.get_style_context().remove_class)("on")
+        self._slide, self._shuf = en, rnd
+
+    def toggle_slide(self, *_):
+        self._slide = not getattr(self, "_slide", False)
+        set_cycle(self._slide, getattr(self, "_shuf", False)); self.sync_toggles()
+
+    def toggle_shuffle(self, *_):
+        self._shuf = not getattr(self, "_shuf", False)
+        set_cycle(getattr(self, "_slide", False), self._shuf); self.sync_toggles()
+
+    def surprise(self, *_):
+        if self.papers:
+            p = random.choice(self.papers); set_wallpaper(p)
+
+    def load(self):
+        for c in self.flow.get_children(): c.destroy()
+        self.papers = list_wallpapers()
+        self.count.set_text("%d wallpapers" % len(self.papers))
+        threading.Thread(target=self._load_thumbs, args=(list(self.papers),), daemon=True).start()
+
+    def _load_thumbs(self, papers):
+        for path in papers:
+            try:
+                pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, THUMB_W, THUMB_H, False)
+            except Exception:
+                continue
+            GLib.idle_add(self._add_thumb, path, pb)
+
+    def _add_thumb(self, path, pb):
+        img = Gtk.Image.new_from_pixbuf(pb); img.get_style_context().add_class("thumb")
+        ev = Gtk.Button(); ev.set_relief(Gtk.ReliefStyle.NONE); ev.add(img)
+        ev.set_tooltip_text(os.path.basename(path))
+        ev.connect("clicked", lambda *_p, pp=path: set_wallpaper(pp))
+        self.flow.add(ev); ev.show_all()
+        return False
+
+if __name__ == "__main__":
+    w = WallpaperManager(); w.connect("destroy", Gtk.main_quit); w.show_all(); Gtk.main()
