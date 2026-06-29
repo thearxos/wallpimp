@@ -138,26 +138,32 @@ class WallpaperManager(Gtk.Window):
             p = random.choice(self.papers); set_wallpaper(p)
 
     def download(self, *_):
-        d = Gtk.Dialog(title="Download wallpapers", transient_for=self, modal=True); d.set_default_size(580, 440)
+        d = Gtk.Dialog(title="Download wallpapers", transient_for=self, modal=False); d.set_default_size(580, 470)
         d.add_button("Close", Gtk.ResponseType.CLOSE)
         a = d.get_content_area(); a.set_spacing(8)
         for m in ("set_margin_top","set_margin_bottom","set_margin_start","set_margin_end"): getattr(a, m)(14)
-        info = Gtk.Label(label="Fetching from %d curated sources  →  %s" % (len(SOURCES), DEST)); info.set_xalign(0); info.get_style_context().add_class("sub")
+        info = Gtk.Label(label="Fetch wallpapers from %d curated sources  →  %s" % (len(SOURCES), DEST)); info.set_xalign(0); info.get_style_context().add_class("sub")
         a.pack_start(info, False, False, 0)
+        row = Gtk.Box(spacing=10)
+        lbl = Gtk.Label(label="Max to download:"); lbl.get_style_context().add_class("sub"); row.pack_start(lbl, False, False, 0)
+        spin = Gtk.SpinButton.new_with_range(10, 5000, 10); spin.set_value(150); row.pack_start(spin, False, False, 0)
+        start = Gtk.Button(label="Download"); start.get_style_context().add_class("tool"); row.pack_end(start, False, False, 0)
+        a.pack_start(row, False, False, 0)
         pb = Gtk.ProgressBar(); pb.set_show_text(True); a.pack_start(pb, False, False, 0)
         tv = Gtk.TextView(); tv.set_editable(False); tv.set_monospace(True); tv.get_style_context().add_class("cap")
         sc = Gtk.ScrolledWindow(); sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC); sc.add(tv); a.pack_start(sc, True, True, 0)
         buf = tv.get_buffer(); stop = {"v": False}
-        d.connect("response", lambda *_a: stop.__setitem__("v", True))
+        d.connect("response", lambda *_a: (stop.__setitem__("v", True), d.destroy()))
         def log(t): GLib.idle_add(lambda: (buf.insert(buf.get_end_iter(), t), tv.scroll_to_iter(buf.get_end_iter(), 0, False, 0, 0)) and False)
         def setp(f, txt): GLib.idle_add(lambda: (pb.set_fraction(f), pb.set_text(txt)) and False)
-        def run():
-            if not sh("command -v git"): log("git is required to download wallpapers.\n"); return
+        def done(): GLib.idle_add(lambda: (start.set_sensitive(True), start.set_label("Download")) and False)
+        def run(limit):
+            if not sh("command -v git"): log("git is required to download wallpapers.\n"); done(); return
             os.makedirs(DEST, exist_ok=True)
             have = set(os.listdir(DEST)); total = len(SOURCES); added = 0
             for i, (owner, repo, branch, sub) in enumerate(SOURCES):
-                if stop["v"]: break
-                setp(i / total, "%d/%d  %s" % (i + 1, total, repo)); log("→ %s/%s …\n" % (owner, repo))
+                if stop["v"] or added >= limit: break
+                setp(min(added / limit, 0.99), "%d/%d sources  ·  %d/%d wallpapers" % (i + 1, total, added, limit)); log("→ %s/%s …\n" % (owner, repo))
                 tmp = tempfile.mkdtemp(prefix="arxwp-")
                 cmd = ["git", "clone", "--depth", "1", "--quiet"]
                 if branch: cmd += ["--branch", branch]
@@ -170,16 +176,21 @@ class WallpaperManager(Gtk.Window):
                     log("  error: %s\n" % e); shutil.rmtree(tmp, ignore_errors=True); continue
                 base = os.path.join(tmp, sub) if sub else tmp; n = 0
                 for rootd, _dn, files in os.walk(base):
+                    if stop["v"] or added >= limit: break
                     if "/.git" in rootd: continue
                     for f in files:
+                        if added >= limit: break
                         if f.lower().endswith(EXTS) and f not in have:
                             try: shutil.copy2(os.path.join(rootd, f), os.path.join(DEST, f)); have.add(f); n += 1; added += 1
                             except Exception: pass
-                log("  + %d new\n" % n); shutil.rmtree(tmp, ignore_errors=True)
+                log("  + %d new  (%d/%d total)\n" % (n, added, limit)); shutil.rmtree(tmp, ignore_errors=True)
             setp(1.0, "done"); log("\nFinished — %d wallpapers added to %s\n" % (added, DEST))
-            GLib.idle_add(self.load)
-        threading.Thread(target=run, daemon=True).start()
-        d.show_all(); d.run(); d.destroy()   # show_all: Dialog.run() shows the window but not its child widgets → blank dialog without this
+            GLib.idle_add(self.load); done()
+        def go(*_):
+            start.set_sensitive(False); start.set_label("Downloading…"); stop["v"] = False
+            threading.Thread(target=run, args=(int(spin.get_value()),), daemon=True).start()
+        start.connect("clicked", go)
+        d.show_all()   # non-modal; user sets a limit then clicks Download. (Dialog.run shows the window but not its children.)
 
     def load(self):
         for c in self.flow.get_children(): c.destroy()
