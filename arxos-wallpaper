@@ -179,7 +179,7 @@ class WallpaperManager(Gtk.Window):
             setp(1.0, "done"); log("\nFinished — %d wallpapers added to %s\n" % (added, DEST))
             GLib.idle_add(self.load)
         threading.Thread(target=run, daemon=True).start()
-        d.run(); d.destroy()
+        d.show_all(); d.run(); d.destroy()   # show_all: Dialog.run() shows the window but not its child widgets → blank dialog without this
 
     def load(self):
         for c in self.flow.get_children(): c.destroy()
